@@ -77,6 +77,8 @@ services:
       - "8501:8501"
     environment:
       - API_BASE_URL=http://api:8000
+      - UI_REFRESH_INTERVAL=2000
+      - UI_TASK_HISTORY_LIMIT=50
     volumes:
       - ./ui:/app/ui
     depends_on:

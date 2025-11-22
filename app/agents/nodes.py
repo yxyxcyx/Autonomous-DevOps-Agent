@@ -2,7 +2,7 @@
 
 from typing import Dict, Any
 import structlog
-from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.prompts import ChatPromptTemplate
 from langchain.schema import SystemMessage, HumanMessage
 import json
@@ -20,10 +20,10 @@ class BaseNode:
     
     def __init__(self):
         """Initialize the LLM client."""
-        self.llm = ChatOpenAI(
+        self.llm = ChatGoogleGenerativeAI(
             model=settings.LLM_MODEL,
             temperature=settings.LLM_TEMPERATURE,
-            api_key=settings.OPENAI_API_KEY
+            google_api_key=settings.GEMINI_API_KEY
         )
     
     def log_llm_call(self, state: AgentState, prompt: str, response: str, tokens: int):
