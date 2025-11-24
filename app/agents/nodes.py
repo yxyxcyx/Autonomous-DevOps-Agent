@@ -2,19 +2,17 @@
 
 import json
 import time
-from typing import Dict, Any, Optional
-from abc import ABC, abstractmethod
+from typing import Dict, Any, Optional, List
 import structlog
 
 from app.agents.state import AgentState
-from app.interfaces.llm import LLMInterface
+from app.interfaces.llm import LLMMessage
 from app.providers.gemini_llm import GeminiLLMProvider
 from app.repo_handler import RepositoryHandler
 from app.sandbox.executor import DockerSandboxExecutor
 from app.sandbox.simple_executor import SimpleExecutor
 from app.config import settings
-from app.constants import DEFAULT_LLM_MODEL
-from langchain_core.messages import HumanMessage, SystemMessage
+from app.constants import DEFAULT_LLM_MODEL, MAX_LOG_DISPLAY_LENGTH
 
 logger = structlog.get_logger()
 
@@ -23,12 +21,11 @@ class BaseNode:
     """Base class for all agent nodes."""
     
     def __init__(self):
-        """Initialize the LLM client."""
-        self.llm = ChatGoogleGenerativeAI(
-            model=DEFAULT_LLM_MODEL,  # Use default model from constants
-            google_api_key=settings.GEMINI_API_KEY,  # Use correct setting name
-            temperature=0.1,
-            convert_system_message_to_human=True  # Convert SystemMessage to HumanMessage for Gemini
+        """Initialize the LLM provider with centralized configuration."""
+        self.llm = GeminiLLMProvider(
+            model=DEFAULT_LLM_MODEL,
+            temperature=settings.LLM_TEMPERATURE,
+            api_key=settings.GEMINI_API_KEY
         )
     
     def log_llm_call(self, state: AgentState, prompt: str, response: str, tokens: int):
@@ -147,25 +144,16 @@ Format your response as a JSON object with these keys:
         
         try:
             # Call LLM for analysis
-            messages = [
-                SystemMessage(content="You are an expert bug analyzer."),
-                HumanMessage(content=prompt)
+            messages: List[LLMMessage] = [
+                LLMMessage(role="system", content="You are an expert bug analyzer."),
+                LLMMessage(role="user", content=prompt)
             ]
-            
-            response = self.llm.invoke(messages)
+
+            response = self.llm.generate_with_retry(messages)
             analysis_text = response.content
-            
-            # Calculate tokens (estimate if not provided)
-            token_count = 0
-            if hasattr(response, 'response_metadata') and response.response_metadata:
-                token_count = response.response_metadata.get("token_usage", {}).get("total_tokens", 0)
-            
-            # If no token count from API, estimate based on text length
-            if token_count == 0:
-                # Rough estimation: 1 token ≈ 4 characters
-                token_count = (len(prompt) + len(analysis_text)) // 4
-            
-            # Log the LLM call
+
+            token_count = response.tokens_used or self.llm.count_tokens(prompt + analysis_text)
+
             self.log_llm_call(
                 state,
                 prompt,
@@ -287,29 +275,19 @@ Format your response as a JSON object with:
 """
         
         try:
-            messages = [
-                SystemMessage(content="You are an expert programmer who writes clean, secure code."),
-                HumanMessage(content=prompt)
+            messages: List[LLMMessage] = [
+                LLMMessage(role="system", content="You are an expert programmer who writes clean, secure code."),
+                LLMMessage(role="user", content=prompt)
             ]
-            
-            response = self.llm.invoke(messages)
+
+            response = self.llm.generate_with_retry(messages)
             code_text = response.content
-            
-            # Calculate tokens (estimate if not provided)
-            token_count = 0
-            if hasattr(response, 'response_metadata') and response.response_metadata:
-                token_count = response.response_metadata.get("token_usage", {}).get("total_tokens", 0)
-            
-            # If no token count from API, estimate based on text length
-            if token_count == 0:
-                # Rough estimation: 1 token ≈ 4 characters
-                token_count = (len(prompt) + len(code_text)) // 4
-            
-            # Log the LLM call
-            from app.constants import MAX_LOG_DISPLAY_LENGTH
+
+            token_count = response.tokens_used or self.llm.count_tokens(prompt + code_text)
+
             self.log_llm_call(
                 state,
-                prompt[:MAX_LOG_DISPLAY_LENGTH],  # Use constant for truncation
+                prompt[:MAX_LOG_DISPLAY_LENGTH],
                 code_text[:MAX_LOG_DISPLAY_LENGTH],
                 token_count
             )
@@ -410,26 +388,16 @@ Provide your review as a JSON object with:
 """
         
         try:
-            messages = [
-                SystemMessage(content="You are a meticulous code reviewer focused on security and quality."),
-                HumanMessage(content=prompt)
+            messages: List[LLMMessage] = [
+                LLMMessage(role="system", content="You are a meticulous code reviewer focused on security and quality."),
+                LLMMessage(role="user", content=prompt)
             ]
-            
-            response = self.llm.invoke(messages)
+
+            response = self.llm.generate_with_retry(messages)
             review_text = response.content
-            
-            # Calculate tokens (estimate if not provided)
-            token_count = 0
-            if hasattr(response, 'response_metadata') and response.response_metadata:
-                token_count = response.response_metadata.get("token_usage", {}).get("total_tokens", 0)
-            
-            # If no token count from API, estimate based on text length
-            if token_count == 0:
-                # Use proper token estimation constant
-                CHARS_PER_TOKEN = 4  # Average characters per token
-                token_count = (len(prompt) + len(review_text)) // CHARS_PER_TOKEN
-            
-            # Log the LLM call
+
+            token_count = response.tokens_used or self.llm.count_tokens(prompt + review_text)
+
             self.log_llm_call(
                 state,
                 prompt,

@@ -105,9 +105,9 @@ class DevOpsAgentOrchestrator:
             logger.info("Code review passed, proceeding to tests")
             return "test"
         elif "rejected" in review_feedback.lower():
-            # Check attempts BEFORE going back to coder
-            if state.get("attempts", 0) >= state.get("max_attempts", 3) - 1:
-                logger.warning("Max attempts will be reached, ending workflow")
+            # Stop only after exhausting all configured attempts
+            if state.get("attempts", 0) >= state.get("max_attempts", 3):
+                logger.warning("Max attempts reached via Reviewer rejection")
                 return "end"
             logger.info("Code review failed, returning to coder")
             return "reject"

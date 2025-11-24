@@ -4,8 +4,9 @@ import subprocess
 import tempfile
 import os
 import structlog
-from typing import Tuple, Optional, Dict
+from typing import Tuple, Optional, Dict, List
 import sys
+import shlex
 
 logger = structlog.get_logger()
 
@@ -58,16 +59,16 @@ class SimpleExecutor:
                 
                 # Determine command to run
                 if test_command:
-                    cmd = test_command
+                    cmd = self._split_command(test_command)
                 else:
-                    cmd = self._get_exec_command(language, code_file)
+                    cmd = self._split_command(self._get_exec_command(language, code_file))
                 
                 # Run the command
                 logger.info(f"Executing command: {cmd}")
                 
                 result = subprocess.run(
                     cmd,
-                    shell=True,
+                    shell=False,
                     cwd=tmpdir,
                     capture_output=True,
                     text=True,

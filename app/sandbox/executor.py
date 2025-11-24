@@ -102,6 +102,9 @@ class DockerSandboxExecutor:
                         with open(dep_path, 'w') as f:
                             f.write(content)
                 
+                # Allow network access only when dependencies must be installed
+                network_mode = "bridge" if dependencies else "none"
+
                 # Create container with enhanced security constraints
                 container = self.client.containers.create(
                     image=base_image,
@@ -111,7 +114,7 @@ class DockerSandboxExecutor:
                     mem_limit=self.max_memory,
                     cpu_quota=int(self.max_cpu * 100000),
                     cpu_period=100000,
-                    network_mode="none",  # No network access
+                    network_mode=network_mode,
                     read_only=True,  # Read-only root filesystem
                     working_dir="/workspace",
                     environment={

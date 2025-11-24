@@ -22,6 +22,23 @@ class CallbackTask(Task):
         logger.error(f"Task {task_id} failed: {exc}")
 
 
+def _run_orchestrator(orchestrator: DevOpsAgentOrchestrator, task_id: str, request_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Run orchestrator coroutine on an isolated event loop."""
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        return loop.run_until_complete(
+            orchestrator.execute_fix(task_id, request_data)
+        )
+    finally:
+        try:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        except Exception:
+            pass
+        asyncio.set_event_loop(None)
+        loop.close()
+
+
 @celery_app.task(bind=True, base=CallbackTask, name="process_bug_fix")
 def process_bug_fix(self, task_id: str, request_data: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -54,23 +71,8 @@ def process_bug_fix(self, task_id: str, request_data: Dict[str, Any]) -> Dict[st
         # Create orchestrator
         orchestrator = DevOpsAgentOrchestrator()
         
-        # Run async workflow using asyncio.run() - cleaner and safer
-        try:
-            result = asyncio.run(
-                orchestrator.execute_fix(task_id, request_data)
-            )
-        except RuntimeError as e:
-            # Handle case where event loop is already running
-            if "asyncio.run() cannot be called from a running event loop" in str(e):
-                # Use nest_asyncio as a fallback
-                import nest_asyncio
-                nest_asyncio.apply()
-                loop = asyncio.get_event_loop()
-                result = loop.run_until_complete(
-                    orchestrator.execute_fix(task_id, request_data)
-                )
-            else:
-                raise
+        # Run async workflow on a dedicated event loop
+        result = _run_orchestrator(orchestrator, task_id, request_data)
         
         logger.info(
             "Bug fix task completed",

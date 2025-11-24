@@ -8,6 +8,8 @@ from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 import structlog
 
+MAX_FILE_READ_BYTES = 200_000  # ~200 KB safety cap for direct reads
+
 logger = structlog.get_logger()
 
 
@@ -147,7 +149,8 @@ class RepositoryHandler:
         repo_path: str, 
         file_path: str,
         start_line: Optional[int] = None,
-        end_line: Optional[int] = None
+        end_line: Optional[int] = None,
+        max_bytes: int = MAX_FILE_READ_BYTES
     ) -> Optional[str]:
         """
         Get content of a specific file in the repository.
@@ -168,16 +171,31 @@ class RepositoryHandler:
                 logger.warning(f"File not found: {file_path}")
                 return None
             
-            with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
-                lines = f.readlines()
-            
+            file_size = os.path.getsize(full_path)
+
             if start_line is not None and end_line is not None:
-                # Adjust to 0-indexed
+                # Stream only the requested window to avoid loading entire file
+                selected_lines = []
                 start_idx = max(0, start_line - 1)
-                end_idx = min(len(lines), end_line)
-                return ''.join(lines[start_idx:end_idx])
-            
-            return ''.join(lines)
+                end_idx = max(start_idx, end_line)
+                with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    for current_line, line_content in enumerate(f):
+                        if current_line > end_idx:
+                            break
+                        if start_idx <= current_line < end_idx:
+                            selected_lines.append(line_content)
+                            if sum(len(l) for l in selected_lines) >= max_bytes:
+                                selected_lines.append("\n[Truncated view due to size limit]\n")
+                                break
+                return ''.join(selected_lines)
+
+            if file_size > max_bytes:
+                with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read(max_bytes)
+                return f"{content}\n[Truncated to {max_bytes} bytes from {file_size} bytes]"
+
+            with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+                return f.read()
             
         except Exception as e:
             logger.error(f"Failed to read file {file_path}: {str(e)}")
