@@ -126,3 +126,6 @@ class GeminiProvider(ILLMProvider):
 
 # Register the provider
 LLMProviderFactory.register_provider("gemini", GeminiProvider)
+
+# Backward compatibility alias so older imports continue to work
+GeminiLLMProvider = GeminiProvider

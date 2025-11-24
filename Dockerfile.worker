@@ -29,12 +29,11 @@ RUN pip install --no-cache-dir --default-timeout=1000 -r requirements.txt
 # Copy application code
 COPY app/ ./app/
 
-# Create non-root user with docker group access
+# Create non-root user
 RUN useradd -m -u 1000 devops && \
-    groupadd -g 999 docker && \
-    usermod -aG docker devops && \
     chown -R devops:devops /app
 
+# Switch to non-root user for security
 USER devops
 
 # Start command is provided by docker-compose

@@ -22,7 +22,30 @@ class DockerSandboxExecutor:
     
     def __init__(self):
         """Initialize Docker client and configuration."""
-        self.client = docker.from_env()
+        try:
+            # Try to connect to Docker socket if running inside container
+            if os.path.exists('/var/run/docker.sock'):
+                self.client = docker.DockerClient(base_url='unix://var/run/docker.sock')
+            else:
+                # Fall back to from_env() for local development
+                self.client = docker.from_env()
+            
+            # Test connection
+            self.client.ping()
+            logger.info("Docker client connected successfully")
+            
+        except Exception as e:
+            logger.error(f"Failed to connect to Docker: {str(e)}")
+            # Try alternative connection methods
+            try:
+                # Try TCP connection if socket fails
+                self.client = docker.DockerClient(base_url='tcp://localhost:2375')
+                self.client.ping()
+                logger.info("Docker client connected via TCP")
+            except:
+                logger.error("Could not connect to Docker daemon")
+                raise RuntimeError("Docker daemon not accessible")
+                
         self.timeout = settings.DOCKER_TIMEOUT
         self.max_memory = settings.DOCKER_MAX_MEMORY
         self.max_cpu = settings.DOCKER_MAX_CPU
@@ -79,7 +102,7 @@ class DockerSandboxExecutor:
                         with open(dep_path, 'w') as f:
                             f.write(content)
                 
-                # Create container with security constraints
+                # Create container with enhanced security constraints
                 container = self.client.containers.create(
                     image=base_image,
                     command="/bin/sh",
@@ -89,7 +112,7 @@ class DockerSandboxExecutor:
                     cpu_quota=int(self.max_cpu * 100000),
                     cpu_period=100000,
                     network_mode="none",  # No network access
-                    read_only=False,  # Allow writes to /tmp
+                    read_only=True,  # Read-only root filesystem
                     working_dir="/workspace",
                     environment={
                         "PYTHONDONTWRITEBYTECODE": "1",
@@ -100,7 +123,11 @@ class DockerSandboxExecutor:
                             "bind": "/workspace",
                             "mode": "rw"
                         }
-                    }
+                    },
+                    user="nobody:nogroup",  # Run as nobody user
+                    security_opt=["no-new-privileges:true"],  # Prevent privilege escalation
+                    cap_drop=["ALL"],  # Drop all capabilities
+                    cap_add=[]  # Don't add any capabilities
                 )
                 
                 # Start container
@@ -147,6 +174,14 @@ class DockerSandboxExecutor:
                 
                 return success, stdout, stderr
                 
+        except docker.errors.DockerException as e:
+            logger.error(f"Docker error during sandbox execution: {str(e)}")
+            # Try to provide a meaningful error message
+            if "Cannot connect to Docker" in str(e) or "Error while fetching" in str(e):
+                error_msg = "Docker daemon not accessible. Please ensure Docker is running and accessible."
+            else:
+                error_msg = str(e)
+            return False, "", error_msg
         except Exception as e:
             logger.error(f"Sandbox execution failed: {str(e)}")
             return False, "", str(e)
@@ -157,9 +192,17 @@ class DockerSandboxExecutor:
                 try:
                     container.stop(timeout=5)
                     container.remove(force=True)
-                    logger.info("Sandbox container cleaned up")
+                    logger.info(f"Container {container.id[:12]} cleaned up successfully")
+                except docker.errors.NotFound:
+                    # Container already removed
+                    pass
                 except Exception as e:
                     logger.error(f"Failed to clean up container: {str(e)}")
+                    # Try force removal as last resort
+                    try:
+                        container.remove(force=True)
+                    except:
+                        logger.error(f"Container {container.id[:12]} cleanup failed permanently")
     
     def _get_base_image(self, language: str) -> str:
         """Get Docker base image for the language."""

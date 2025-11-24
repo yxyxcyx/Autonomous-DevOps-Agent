@@ -35,12 +35,12 @@ DEFAULT_DOCKER_MAX_CPU = 0.5
 DOCKER_CLEANUP_TIMEOUT = 5
 
 # LLM Configuration
-DEFAULT_LLM_MODEL = "gemini-1.5-flash"
+DEFAULT_LLM_MODEL = "gemini-1.5-flash"  # Use actual model that exists
 DEFAULT_LLM_TEMPERATURE = 0.1
 DEFAULT_LLM_MAX_RETRIES = 3
 
 # UI Configuration
-DEFAULT_UI_REFRESH_INTERVAL = 2000  # milliseconds
+DEFAULT_UI_REFRESH_INTERVAL = 5000  # milliseconds (5 seconds for better performance)
 DEFAULT_UI_TASK_HISTORY_LIMIT = 50
 
 # Logging Configuration

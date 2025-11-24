@@ -4,6 +4,8 @@ import streamlit as st
 import os
 import sys
 from datetime import datetime, timedelta
+import pytz
+from dateutil import tz
 from typing import Dict, Any, List, Optional
 import pandas as pd
 
@@ -182,8 +184,12 @@ def render_table_view(tasks: List[Dict[str, Any]]):
         data.append({
             'Task ID': task.get('task_id', '')[:16] + '...',
             'Status': task.get('status', 'unknown'),
-            'Created': datetime.fromisoformat(task.get('created_at', '')).strftime("%Y-%m-%d %H:%M")
-            if task.get('created_at') else 'N/A',
+            'Created': (
+                datetime.fromisoformat(task.get('created_at', '').replace('Z', '+00:00') if 'Z' in task.get('created_at', '') else task.get('created_at', ''))
+                .replace(tzinfo=pytz.UTC)
+                .astimezone(tz.tzlocal())
+                .strftime("%Y-%m-%d %H:%M")
+            ) if task.get('created_at') else 'N/A',
             'Completed': datetime.fromisoformat(task.get('completed_at', '')).strftime("%Y-%m-%d %H:%M")
             if task.get('completed_at') else 'N/A',
         })
@@ -225,7 +231,12 @@ def render_detailed_view(tasks: List[Dict[str, Any]], api_client: APIClient):
                 
                 created_at = task.get('created_at')
                 if created_at:
-                    st.markdown(f"**Created:** {datetime.fromisoformat(created_at).strftime('%Y-%m-%d %H:%M:%S')}")
+                    # Convert UTC to local timezone
+                    utc_time = datetime.fromisoformat(created_at.replace('Z', '+00:00') if 'Z' in created_at else created_at)
+                    if utc_time.tzinfo is None:
+                        utc_time = utc_time.replace(tzinfo=pytz.UTC)
+                    local_time = utc_time.astimezone(tz.tzlocal())
+                    st.markdown(f"**Created:** {local_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
                 
                 completed_at = task.get('completed_at')
                 if completed_at:

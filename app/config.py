@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     REDIS_HOST: str = os.getenv("REDIS_HOST", DEFAULT_REDIS_HOST)
     REDIS_PORT: int = int(os.getenv("REDIS_PORT", str(DEFAULT_REDIS_PORT)))
     REDIS_DB: int = int(os.getenv("REDIS_DB", str(DEFAULT_REDIS_DB)))
+    REDIS_PASSWORD: str = os.getenv("REDIS_PASSWORD", "")
     
     # Celery Configuration
     CELERY_BROKER_URL: str = os.getenv("CELERY_BROKER_URL", DEFAULT_REDIS_URL)

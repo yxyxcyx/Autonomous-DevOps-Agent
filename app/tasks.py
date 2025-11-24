@@ -54,16 +54,23 @@ def process_bug_fix(self, task_id: str, request_data: Dict[str, Any]) -> Dict[st
         # Create orchestrator
         orchestrator = DevOpsAgentOrchestrator()
         
-        # Run async workflow in sync context
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
+        # Run async workflow using asyncio.run() - cleaner and safer
         try:
-            result = loop.run_until_complete(
+            result = asyncio.run(
                 orchestrator.execute_fix(task_id, request_data)
             )
-        finally:
-            loop.close()
+        except RuntimeError as e:
+            # Handle case where event loop is already running
+            if "asyncio.run() cannot be called from a running event loop" in str(e):
+                # Use nest_asyncio as a fallback
+                import nest_asyncio
+                nest_asyncio.apply()
+                loop = asyncio.get_event_loop()
+                result = loop.run_until_complete(
+                    orchestrator.execute_fix(task_id, request_data)
+                )
+            else:
+                raise
         
         logger.info(
             "Bug fix task completed",

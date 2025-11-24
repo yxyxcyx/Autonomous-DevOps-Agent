@@ -163,3 +163,10 @@ class LLMProviderFactory:
             List of provider names
         """
         return list(cls._providers.keys())
+
+
+# Backward compatibility ----------------------------------------------------
+# Several modules still import `LLMInterface` from this module.  Rename the
+# canonical interface (ILLMProvider) to `LLMInterface` to avoid breaking those
+# imports while the rest of the codebase migrates to the new name.
+LLMInterface = ILLMProvider

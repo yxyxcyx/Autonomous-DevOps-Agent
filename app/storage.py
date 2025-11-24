@@ -8,10 +8,8 @@ from datetime import datetime
 from app.config import settings
 from app.models import TaskResult, TaskStatus
 from app.interfaces.storage import ITaskStorage
-from app.logging_config import get_logger
-from app.utils import retry_on_exception
 
-logger = get_logger(__name__)
+# Note: Removed structlog logger and retry decorators to prevent recursion issues
 
 
 class RedisTaskStorage(ITaskStorage):
@@ -27,18 +25,21 @@ class RedisTaskStorage(ITaskStorage):
         if redis_client:
             self.redis_client = redis_client
         else:
-            self.redis_client = redis.Redis(
+            # Use connection pool for better performance and resource management
+            pool = redis.ConnectionPool(
                 host=settings.REDIS_HOST,
                 port=settings.REDIS_PORT,
                 db=settings.REDIS_DB,
+                password=settings.REDIS_PASSWORD if settings.REDIS_PASSWORD else None,
                 decode_responses=True,
                 socket_connect_timeout=5,
                 socket_timeout=5,
+                max_connections=50,
                 retry_on_timeout=True,
                 health_check_interval=30
             )
+            self.redis_client = redis.Redis(connection_pool=pool)
         
-    @retry_on_exception(max_retries=3, delay=0.5)
     def store_task(self, task_result: TaskResult) -> bool:
         """
         Store a task result in Redis.
@@ -51,34 +52,39 @@ class RedisTaskStorage(ITaskStorage):
         """
         try:
             key = f"task:{task_result.task_id}"
-            data = task_result.dict()
             
-            # Convert datetime objects to ISO format for JSON serialization
-            if data.get('created_at'):
-                data['created_at'] = data['created_at'].isoformat()
-            if data.get('completed_at'):
-                data['completed_at'] = data['completed_at'].isoformat()
+            # Manually construct data dict to avoid Pydantic serialization issues
+            data = {
+                'task_id': task_result.task_id,
+                'status': task_result.status.value if hasattr(task_result.status, 'value') else str(task_result.status),
+                'created_at': task_result.created_at.isoformat() if task_result.created_at else None,
+                'completed_at': task_result.completed_at.isoformat() if task_result.completed_at else None,
+                'result': task_result.result if task_result.result else {},
+                'error': task_result.error if task_result.error else None,
+                'execution_steps': task_result.execution_steps if task_result.execution_steps else []
+            }
+            
+            # Simple JSON serialization with string fallback
+            json_data = json.dumps(data, default=str)
                 
             self.redis_client.setex(
                 key, 
                 settings.TASK_STORAGE_TTL, 
-                json.dumps(data)
+                json_data
             )
             
-            # Also add to task list for pagination (will update score if exists)
+            # Also add to task list for pagination
             self.redis_client.zadd(
                 "tasks_by_time",
                 {task_result.task_id: datetime.utcnow().timestamp()}
             )
             
-            logger.info("Task stored in Redis", task_id=task_result.task_id)
             return True
             
-        except Exception as e:
-            logger.error("Failed to store task in Redis", task_id=task_result.task_id, error=str(e))
+        except Exception:
+            # Silent failure - don't log to avoid recursion
             return False
     
-    @retry_on_exception(max_retries=3, delay=0.5)
     def get_task(self, task_id: str) -> Optional[TaskResult]:
         """
         Retrieve a task from Redis.
@@ -106,8 +112,7 @@ class RedisTaskStorage(ITaskStorage):
                 
             return TaskResult(**task_dict)
             
-        except Exception as e:
-            logger.error("Failed to retrieve task from Redis", task_id=task_id, error=str(e))
+        except Exception:
             return None
     
     def update_task_status(
@@ -140,8 +145,7 @@ class RedisTaskStorage(ITaskStorage):
                 
             return self.store_task(task)
             
-        except Exception as e:
-            logger.error("Failed to update task status", task_id=task_id, error=str(e))
+        except Exception:
             return False
     
     def list_tasks(self, limit: int = 10, offset: int = 0) -> List[TaskResult]:
@@ -167,8 +171,7 @@ class RedisTaskStorage(ITaskStorage):
                     
             return tasks
             
-        except Exception as e:
-            logger.error("Failed to list tasks from Redis", error=str(e))
+        except Exception:
             return []
     
     def delete_task(self, task_id: str) -> bool:
@@ -185,12 +188,9 @@ class RedisTaskStorage(ITaskStorage):
             key = f"task:{task_id}"
             self.redis_client.delete(key)
             self.redis_client.zrem("tasks_by_time", task_id)
-            
-            logger.info("Task deleted from Redis", task_id=task_id)
             return True
             
-        except Exception as e:
-            logger.error("Failed to delete task from Redis", task_id=task_id, error=str(e))
+        except Exception:
             return False
     
     def get_task_count(self) -> int:
@@ -202,8 +202,7 @@ class RedisTaskStorage(ITaskStorage):
         """
         try:
             return self.redis_client.zcard("tasks_by_time")
-        except Exception as e:
-            logger.error("Failed to get task count", error=str(e))
+        except Exception:
             return 0
 
 

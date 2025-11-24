@@ -1,16 +1,20 @@
-"""Agent nodes for the DevOps workflow."""
+"""Agent nodes for the bug fixing workflow."""
 
-from typing import Dict, Any
-import structlog
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.prompts import ChatPromptTemplate
-from langchain.schema import SystemMessage, HumanMessage
 import json
 import time
+from typing import Dict, Any, Optional
+from abc import ABC, abstractmethod
+import structlog
 
 from app.agents.state import AgentState
+from app.interfaces.llm import LLMInterface
+from app.providers.gemini_llm import GeminiLLMProvider
+from app.repo_handler import RepositoryHandler
 from app.sandbox.executor import DockerSandboxExecutor
+from app.sandbox.simple_executor import SimpleExecutor
 from app.config import settings
+from app.constants import DEFAULT_LLM_MODEL
+from langchain_core.messages import HumanMessage, SystemMessage
 
 logger = structlog.get_logger()
 
@@ -21,9 +25,10 @@ class BaseNode:
     def __init__(self):
         """Initialize the LLM client."""
         self.llm = ChatGoogleGenerativeAI(
-            model=settings.LLM_MODEL,
-            temperature=settings.LLM_TEMPERATURE,
-            google_api_key=settings.GEMINI_API_KEY
+            model=DEFAULT_LLM_MODEL,  # Use default model from constants
+            google_api_key=settings.GEMINI_API_KEY,  # Use correct setting name
+            temperature=0.1,
+            convert_system_message_to_human=True  # Convert SystemMessage to HumanMessage for Gemini
         )
     
     def log_llm_call(self, state: AgentState, prompt: str, response: str, tokens: int):
@@ -52,6 +57,10 @@ class ManagerNode(BaseNode):
     Manager node: Analyzes bugs and creates action plans.
     """
     
+    def __init__(self):
+        super().__init__()
+        self.repo_handler = RepositoryHandler()
+    
     def process(self, state: AgentState) -> AgentState:
         """
         Analyze the bug and create an action plan.
@@ -60,7 +69,55 @@ class ManagerNode(BaseNode):
         
         state["current_step"] = "analysis"
         
-        # Construct analysis prompt
+        # Clone and analyze repository
+        repo_context = ""
+        repo_analysis = {}
+        
+        if state.get("repository_url"):
+            logger.info("Cloning repository for analysis")
+            success, repo_path, error = self.repo_handler.clone_repository(
+                state["repository_url"],
+                state.get("branch", "main")
+            )
+            
+            if success:
+                state["repo_path"] = repo_path  # Store for other nodes
+                repo_analysis = self.repo_handler.analyze_repository(repo_path)
+                
+                # Search for relevant code based on bug description
+                search_terms = state["bug_description"].split()[:5]  # Key words
+                relevant_files = []
+                
+                for term in search_terms:
+                    if len(term) > 3:  # Skip short words
+                        search_results = self.repo_handler.search_code(
+                            repo_path, term, max_results=10
+                        )
+                        for result in search_results:
+                            if result["file"] not in relevant_files:
+                                relevant_files.append(result["file"])
+                
+                # Build context from repository
+                repo_context = f"""
+
+Repository Analysis:
+- Total files: {repo_analysis.get('file_count', 0)}
+- Total lines: {repo_analysis.get('total_lines', 0)}
+- Main languages: {', '.join(list(repo_analysis.get('languages', {}).keys())[:5])}
+- Test files found: {len(repo_analysis.get('test_files', []))}
+
+Potentially relevant files based on bug description:
+{chr(10).join(f'- {f}' for f in relevant_files[:10])}
+
+README excerpt:
+{repo_analysis.get('readme_content', 'Not found')[:500]}
+"""
+                state["logs"].append(f"Repository cloned and analyzed: {repo_path}")
+            else:
+                state["error_messages"].append(f"Failed to clone repository: {error}")
+                state["logs"].append("Warning: Proceeding without repository context")
+        
+        # Construct analysis prompt with real context
         prompt = f"""
 You are a senior software engineer analyzing a bug report.
 
@@ -71,6 +128,7 @@ Repository: {state["repository_url"]}
 Branch: {state["branch"]}
 Language: {state["language"]}
 Test Command: {state.get("test_command", "Not specified")}
+{repo_context}
 
 Please analyze this bug and provide:
 1. Root cause analysis
@@ -97,12 +155,22 @@ Format your response as a JSON object with these keys:
             response = self.llm.invoke(messages)
             analysis_text = response.content
             
+            # Calculate tokens (estimate if not provided)
+            token_count = 0
+            if hasattr(response, 'response_metadata') and response.response_metadata:
+                token_count = response.response_metadata.get("token_usage", {}).get("total_tokens", 0)
+            
+            # If no token count from API, estimate based on text length
+            if token_count == 0:
+                # Rough estimation: 1 token ≈ 4 characters
+                token_count = (len(prompt) + len(analysis_text)) // 4
+            
             # Log the LLM call
             self.log_llm_call(
                 state,
                 prompt,
                 analysis_text,
-                response.response_metadata.get("token_usage", {}).get("total_tokens", 0)
+                token_count
             )
             
             # Parse JSON response
@@ -138,6 +206,10 @@ class CoderNode(BaseNode):
     Coder node: Writes code to fix bugs.
     """
     
+    def __init__(self):
+        super().__init__()
+        self.repo_handler = RepositoryHandler()
+    
     def process(self, state: AgentState) -> AgentState:
         """
         Generate code fix based on analysis and feedback.
@@ -157,7 +229,36 @@ class CoderNode(BaseNode):
         if state.get("review_feedback"):
             context += f"\nReviewer feedback:\n{state['review_feedback']}\n"
         
-        # Construct coding prompt
+        # Get actual code context if repository was cloned
+        code_context = ""
+        if state.get("repo_path"):
+            # Parse affected files from analysis
+            affected_files = []
+            try:
+                if state.get("analysis"):
+                    # Extract affected files from analysis
+                    for line in state["analysis"].split('\n'):
+                        if "Affected Files:" in line:
+                            files_str = line.split("Affected Files:")[1].strip()
+                            affected_files = [f.strip() for f in files_str.split(',')]
+                            break
+            except:
+                pass
+            
+            # Read actual code from affected files
+            if affected_files:
+                code_snippets = []
+                for file_path in affected_files[:3]:  # Limit to 3 files
+                    content = self.repo_handler.get_file_content(
+                        state["repo_path"], file_path
+                    )
+                    if content:
+                        code_snippets.append(f"\n=== {file_path} ===\n{content[:1000]}")
+                
+                if code_snippets:
+                    code_context = f"\n\nActual code from repository:{chr(10).join(code_snippets)}"
+        
+        # Construct coding prompt with real code
         prompt = f"""
 You are an expert programmer fixing a bug.
 
@@ -165,6 +266,7 @@ Bug Analysis:
 {state.get("analysis", "No analysis available")}
 
 {context}
+{code_context}
 
 Language: {state["language"]}
 Repository: {state["repository_url"]}
@@ -174,6 +276,8 @@ The code should be production-ready and include:
 1. The fix implementation
 2. Error handling
 3. Comments explaining the fix
+
+IMPORTANT: Base your fix on the actual code shown above, not assumptions.
 
 Format your response as a JSON object with:
 - filename: string (main file to patch)
@@ -191,12 +295,23 @@ Format your response as a JSON object with:
             response = self.llm.invoke(messages)
             code_text = response.content
             
+            # Calculate tokens (estimate if not provided)
+            token_count = 0
+            if hasattr(response, 'response_metadata') and response.response_metadata:
+                token_count = response.response_metadata.get("token_usage", {}).get("total_tokens", 0)
+            
+            # If no token count from API, estimate based on text length
+            if token_count == 0:
+                # Rough estimation: 1 token ≈ 4 characters
+                token_count = (len(prompt) + len(code_text)) // 4
+            
             # Log the LLM call
+            from app.constants import MAX_LOG_DISPLAY_LENGTH
             self.log_llm_call(
                 state,
-                prompt,
-                code_text,
-                response.response_metadata.get("token_usage", {}).get("total_tokens", 0)
+                prompt[:MAX_LOG_DISPLAY_LENGTH],  # Use constant for truncation
+                code_text[:MAX_LOG_DISPLAY_LENGTH],
+                token_count
             )
             
             # Parse JSON response
@@ -303,12 +418,23 @@ Provide your review as a JSON object with:
             response = self.llm.invoke(messages)
             review_text = response.content
             
+            # Calculate tokens (estimate if not provided)
+            token_count = 0
+            if hasattr(response, 'response_metadata') and response.response_metadata:
+                token_count = response.response_metadata.get("token_usage", {}).get("total_tokens", 0)
+            
+            # If no token count from API, estimate based on text length
+            if token_count == 0:
+                # Use proper token estimation constant
+                CHARS_PER_TOKEN = 4  # Average characters per token
+                token_count = (len(prompt) + len(review_text)) // CHARS_PER_TOKEN
+            
             # Log the LLM call
             self.log_llm_call(
                 state,
                 prompt,
                 review_text,
-                response.response_metadata.get("token_usage", {}).get("total_tokens", 0)
+                token_count
             )
             
             # Parse review response
@@ -350,9 +476,20 @@ class TestRunnerNode(BaseNode):
     """
     
     def __init__(self):
-        """Initialize with Docker executor."""
+        """Initialize with executor (Docker or simple fallback)."""
         super().__init__()
-        self.executor = DockerSandboxExecutor()
+        try:
+            # Try to use Docker sandbox
+            self.executor = DockerSandboxExecutor()
+            logger.info("Using Docker sandbox executor")
+        except Exception as e:
+            # Fall back to simple executor if Docker is not available
+            logger.warning(f"Docker not available ({str(e)}), using simple executor")
+            self.executor = SimpleExecutor()
+        
+        # Initialize repository executor for testing against real code
+        from app.sandbox.repository_executor import RepositoryExecutor
+        self.repo_executor = RepositoryExecutor()
     
     def process(self, state: AgentState) -> AgentState:
         """
@@ -373,22 +510,51 @@ class TestRunnerNode(BaseNode):
             })
             return state
         
+        success = False
+        stdout = ""
+        stderr = ""
+        
         try:
-            # Execute code in sandbox
-            success, stdout, stderr = self.executor.execute_code(
-                code=latest_patch.get("code", ""),
-                language=state["language"],
-                test_command=state.get("test_command"),
-                dependencies=latest_patch.get("dependencies", {}),
-                files={}  # Additional files if needed
-            )
+            # Check if we have a repository to test against
+            if state.get("repo_path") and state.get("test_command"):
+                # Test against actual repository
+                logger.info("Testing patch against actual repository")
+                
+                # Prepare patch data
+                patch_data = {
+                    latest_patch["filename"]: latest_patch["code"]
+                }
+                
+                # Add any additional files from the patch
+                if latest_patch.get("files"):
+                    patch_data.update(latest_patch["files"])
+                
+                success, stdout, stderr = self.repo_executor.execute_with_repository(
+                    repo_path=state["repo_path"],
+                    patch_data=patch_data,
+                    test_command=state["test_command"],
+                    language=state["language"]
+                )
+            else:
+                # Fall back to isolated execution
+                logger.info("No repository context, running isolated test")
+                test_cmd = state.get("test_command")
+                
+                success, stdout, stderr = self.executor.execute(
+                    code=latest_patch["code"],
+                    language=state["language"],
+                    test_command=test_cmd,
+                    files=latest_patch.get("files"),
+                    dependencies=latest_patch.get("dependencies")
+                )
             
             # Record test results
+            from app.constants import MAX_STDOUT_DISPLAY_LENGTH, MAX_STDERR_DISPLAY_LENGTH
             test_result = {
                 "attempt": state["attempts"],
                 "success": success,
-                "stdout": stdout[:1000],  # Truncate for storage
-                "stderr": stderr[:1000],
+                "stdout": stdout[:MAX_STDOUT_DISPLAY_LENGTH],  # Use constant
+                "stderr": stderr[:MAX_STDERR_DISPLAY_LENGTH],  # Use constant
                 "error": stderr if not success else None,
                 "timestamp": time.time()
             }

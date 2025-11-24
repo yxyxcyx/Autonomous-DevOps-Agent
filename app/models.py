@@ -44,17 +44,4 @@ class TaskResult(BaseModel):
     execution_steps: List[Dict[str, Any]] = []
 
 
-class AgentState(BaseModel):
-    """State model for the agent execution."""
-    bug_description: str
-    repository_url: str
-    branch: str
-    test_command: Optional[str]
-    current_step: str = "initialize"
-    attempts: int = 0
-    max_attempts: int = 3
-    patches: List[Dict[str, Any]] = []
-    test_results: List[Dict[str, Any]] = []
-    final_patch: Optional[Dict[str, Any]] = None
-    error_messages: List[str] = []
-    logs: List[str] = []
+# AgentState removed - Using TypedDict definition in agents/state.py for LangGraph compatibility

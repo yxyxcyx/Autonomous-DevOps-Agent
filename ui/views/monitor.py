@@ -4,6 +4,8 @@ import streamlit as st
 import os
 import sys
 from datetime import datetime
+import pytz
+from dateutil import tz
 from typing import Dict, Any, Optional
 
 # Add parent directory to path for imports
@@ -85,11 +87,21 @@ def render_monitor_page(api_client: APIClient):
     with col1:
         created_at = task_data.get('created_at')
         if created_at:
-            st.metric("Created", datetime.fromisoformat(created_at).strftime("%Y-%m-%d %H:%M"))
+            # Convert UTC to local timezone
+            utc_time = datetime.fromisoformat(created_at.replace('Z', '+00:00') if 'Z' in created_at else created_at)
+            if utc_time.tzinfo is None:
+                utc_time = utc_time.replace(tzinfo=pytz.UTC)
+            local_time = utc_time.astimezone(tz.tzlocal())
+            st.metric("Created", local_time.strftime("%Y-%m-%d %H:%M:%S %Z"))
     with col2:
         completed_at = task_data.get('completed_at')
         if completed_at:
-            st.metric("Completed", datetime.fromisoformat(completed_at).strftime("%Y-%m-%d %H:%M"))
+            # Convert UTC to local timezone
+            utc_time = datetime.fromisoformat(completed_at.replace('Z', '+00:00') if 'Z' in completed_at else completed_at)
+            if utc_time.tzinfo is None:
+                utc_time = utc_time.replace(tzinfo=pytz.UTC)
+            local_time = utc_time.astimezone(tz.tzlocal())
+            st.metric("Completed", local_time.strftime("%Y-%m-%d %H:%M:%S %Z"))
     with col3:
         if created_at and completed_at:
             duration = (datetime.fromisoformat(completed_at) - 

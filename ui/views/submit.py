@@ -1,4 +1,4 @@
-"""Submit page for bug fix requests."""
+"""Submit view for bug fix requests."""
 
 import streamlit as st
 import json
@@ -16,7 +16,7 @@ from ui.api_client import APIClient
 
 def render_submit_page(api_client: APIClient):
     """
-    Render the bug fix submission page with multiple input methods.
+    Render the bug fix submission view with multiple input methods.
     
     Args:
         api_client: API client instance for backend communication

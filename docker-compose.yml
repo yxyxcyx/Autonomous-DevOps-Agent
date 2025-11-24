@@ -5,15 +5,17 @@ services:
     image: redis:7-alpine
     container_name: devops-agent-redis
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"  # Only bind to localhost
     volumes:
       - redis_data:/data
-    command: redis-server --appendonly yes
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-devops_redis_pass}
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5
+    networks:
+      - devops-network
 
   api:
     build:
@@ -21,20 +23,24 @@ services:
       dockerfile: Dockerfile.api
     container_name: devops-agent-api
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"  # Only bind to localhost
     environment:
       - REDIS_HOST=redis
-      - CELERY_BROKER_URL=redis://redis:6379/0
-      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-devops_redis_pass}
+      - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD:-devops_redis_pass}@redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD:-devops_redis_pass}@redis:6379/0
     env_file:
       - .env
     volumes:
-      - ./app:/app/app
-      - /var/run/docker.sock:/var/run/docker.sock  # For Docker-in-Docker
+      - ./app:/app/app:ro  # Read-only mount
+      # Docker socket removed for security
     depends_on:
       redis:
         condition: service_healthy
+    networks:
+      - devops-network
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    user: "1000:1000"  # Run as non-root
 
   worker:
     build:
@@ -43,30 +49,60 @@ services:
     container_name: devops-agent-worker
     environment:
       - REDIS_HOST=redis
-      - CELERY_BROKER_URL=redis://redis:6379/0
-      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-devops_redis_pass}
+      - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD:-devops_redis_pass}@redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD:-devops_redis_pass}@redis:6379/0
     env_file:
       - .env
     volumes:
-      - ./app:/app/app
-      - /var/run/docker.sock:/var/run/docker.sock  # For Docker sandbox
+      - ./app:/app/app:ro  # Read-only mount
+      - /tmp/sandbox:/tmp/sandbox:rw  # Sandbox directory for code execution
     depends_on:
       redis:
         condition: service_healthy
+    networks:
+      - devops-network
     command: celery -A app.celery_app worker --loglevel=info --concurrency=2
+    user: "1000:1000"  # Run as non-root
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+
+  # Separate Docker-in-Docker service for sandboxed execution
+  dind:
+    image: docker:24-dind
+    container_name: devops-agent-dind
+    privileged: true  # Required for Docker-in-Docker
+    environment:
+      - DOCKER_TLS_CERTDIR=/certs
+    volumes:
+      - docker-certs-ca:/certs/ca
+      - docker-certs-client:/certs/client
+      - dind-storage:/var/lib/docker
+    networks:
+      - devops-network
+    command: ["--tls=false"]  # Disable TLS for simplicity in internal network
 
   flower:
     image: mher/flower:2.0
     container_name: devops-agent-flower
     ports:
-      - "5555:5555"
+      - "127.0.0.1:5555:5555"  # Only bind to localhost
     environment:
-      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD:-devops_redis_pass}@redis:6379/0
       - FLOWER_PORT=5555
+      - FLOWER_BASIC_AUTH=${FLOWER_USER:-admin}:${FLOWER_PASSWORD:-admin}
     depends_on:
       - redis
       - worker
-    command: celery flower --broker=redis://redis:6379/0
+    networks:
+      - devops-network
+    command: celery flower --broker=redis://:${REDIS_PASSWORD:-devops_redis_pass}@redis:6379/0
 
   ui:
     build:
@@ -74,20 +110,29 @@ services:
       dockerfile: Dockerfile.ui
     container_name: devops-agent-ui
     ports:
-      - "8501:8501"
+      - "127.0.0.1:8501:8501"  # Only bind to localhost
     environment:
       - API_BASE_URL=http://api:8000
       - UI_REFRESH_INTERVAL=2000
       - UI_TASK_HISTORY_LIMIT=50
     volumes:
-      - ./ui:/app/ui
+      - ./ui:/app/ui:ro  # Read-only mount
     depends_on:
       - api
-    command: streamlit run ui/app.py --server.port=8501 --server.address=0.0.0.0
+    networks:
+      - devops-network
+    command: streamlit run ui/main.py --server.port=8501 --server.address=0.0.0.0
+    user: "1000:1000"  # Run as non-root
 
 volumes:
   redis_data:
+  docker-certs-ca:
+  docker-certs-client:
+  dind-storage:
 
 networks:
-  default:
-    name: devops-agent-network
+  devops-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
